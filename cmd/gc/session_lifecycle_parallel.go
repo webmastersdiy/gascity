@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -144,18 +147,31 @@ func minWakeIntervalDefersCandidate(candidate startCandidate, cfg *config.City, 
 	return clk.Now().Sub(completed) < mwi
 }
 
+// watchdogTailBytes bounds how far back from the end of events.jsonl the
+// watchdog gate scans for a fresh actor=target event. The tail is large
+// enough to span many minutes of normal activity but small enough that
+// a stuck target does not force a multi-MB read on every reconciler tick.
+const watchdogTailBytes = 64 * 1024
+
+// watchdogScanBufferBytes sizes the bufio.Scanner line buffer used by the
+// gate. Payload-heavy bead.updated events embed full bead descriptions and
+// metadata, so individual JSONL lines can exceed 1 MiB. Anything smaller
+// risks bufio.ErrTooLong on a normal events file.
+const watchdogScanBufferBytes = 4 * 1024 * 1024
+
 // watchdogTargetActiveDefersCandidate reports whether the candidate's agent
 // is configured as a watchdog for another agent template, and that target
 // has been making progress recently enough that the watchdog has nothing
-// new to verify. Progress is measured by the most-recent CreatedAt across
-// beads where Assignee matches the target template name: each patrol cycle
-// of a long-running target creates a fresh wisp bead, so this signal
-// advances continuously while the target is alive and goes stale promptly
-// when the target stops generating new beads. Returns false (do not defer)
-// when no watchdog is configured, when no beads have ever been assigned to
-// the target, or when the most recent assignee=target bead's CreatedAt is
-// the zero time - those cases yield no signal, so the watchdog should fire.
-func watchdogTargetActiveDefersCandidate(candidate startCandidate, cfg *config.City, store beads.Store, clk clock.Clock) bool {
+// new to verify. Progress is measured by the most-recent ts across recent
+// events.jsonl entries whose actor field matches the target template name.
+// Every bead.created / bead.updated / bead.closed event tags the actor that
+// performed it, so the signal advances on every bead touch by the target
+// (not just on new wisp creation as the previous CreatedAt-based signal
+// did). Returns false (do not defer) when no watchdog is configured, when
+// the events file is missing or unreadable, or when no actor=target events
+// appear in the scanned tail - those cases yield no signal, so the
+// watchdog should fire.
+func watchdogTargetActiveDefersCandidate(candidate startCandidate, cfg *config.City, cityPath string, clk clock.Clock) bool {
 	if candidate.session == nil {
 		return false
 	}
@@ -171,23 +187,68 @@ func watchdogTargetActiveDefersCandidate(candidate startCandidate, cfg *config.C
 	if threshold <= 0 {
 		return false
 	}
-	if store == nil {
+	if cityPath == "" {
 		return false
 	}
-	assigned, err := store.List(beads.ListQuery{Assignee: target, IncludeClosed: true})
+	maxTs, ok := latestActorEventTs(citylayout.RuntimePath(cityPath, "events.jsonl"), target)
+	if !ok {
+		return false
+	}
+	return clk.Now().Sub(maxTs) < threshold
+}
+
+// latestActorEventTs scans the tail of an events.jsonl file and returns the
+// most recent ts across entries whose actor matches target. The second
+// return is false when the file is missing, unreadable, or contains no
+// matching events in the scanned tail. Malformed lines are skipped so a
+// single corrupt line does not blind the gate.
+func latestActorEventTs(eventsPath, target string) (time.Time, bool) {
+	f, err := os.Open(eventsPath)
 	if err != nil {
-		return false
+		return time.Time{}, false
 	}
-	var maxCreated time.Time
-	for _, b := range assigned {
-		if b.CreatedAt.After(maxCreated) {
-			maxCreated = b.CreatedAt
+	defer f.Close() //nolint:errcheck // read-only file
+	info, err := f.Stat()
+	if err != nil {
+		return time.Time{}, false
+	}
+	var offset int64
+	skipFirst := false
+	if info.Size() > watchdogTailBytes {
+		offset = info.Size() - watchdogTailBytes
+		skipFirst = true
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return time.Time{}, false
+	}
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), watchdogScanBufferBytes)
+	var maxTs time.Time
+	first := true
+	for scanner.Scan() {
+		if first && skipFirst {
+			first = false
+			continue
+		}
+		first = false
+		var rec struct {
+			Actor string    `json:"actor"`
+			Ts    time.Time `json:"ts"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
+			continue
+		}
+		if rec.Actor != target {
+			continue
+		}
+		if rec.Ts.After(maxTs) {
+			maxTs = rec.Ts
 		}
 	}
-	if maxCreated.IsZero() {
-		return false
+	if maxTs.IsZero() {
+		return time.Time{}, false
 	}
-	return clk.Now().Sub(maxCreated) < threshold
+	return maxTs, true
 }
 
 func asyncStartBatchNeedsFollowUp(candidates []startCandidate, cfg *config.City) bool {
@@ -1574,7 +1635,7 @@ func executePlannedStartsTraced(
 				logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "deferred_by_min_wake_interval", time.Time{}, time.Time{}, nil)
 				continue
 			}
-			if watchdogTargetActiveDefersCandidate(candidate, cfg, store, clk) {
+			if watchdogTargetActiveDefersCandidate(candidate, cfg, cityPath, clk) {
 				logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "deferred_by_watchdog_target_active", time.Time{}, time.Time{}, nil)
 				continue
 			}

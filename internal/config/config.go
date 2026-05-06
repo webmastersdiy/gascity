@@ -1725,18 +1725,18 @@ type Agent struct {
 	// supervises (e.g., "gastown.deacon"). When set together with
 	// WatchdogStaleThreshold, the controller defers waking THIS agent as
 	// long as the target is making progress, measured by the most-recent
-	// CreatedAt across beads where Assignee matches the target template
-	// name. Patrol-style targets create a fresh wisp bead per cycle, so
-	// this signal advances continuously while the target is alive and
-	// goes stale promptly when the target stops generating new beads.
-	// The watchdog only fires when the target may be stuck. Empty
-	// disables the gate.
+	// ts across .gc/events.jsonl entries whose actor field matches the
+	// target template name. Every bead.created / bead.updated /
+	// bead.closed event tags the actor that performed it, so the signal
+	// advances on every bead touch by the target (not just on new wisp
+	// creation). The watchdog only fires when the target may be stuck.
+	// Empty disables the gate.
 	WatchdogTargetTemplate string `toml:"watchdog_target_template,omitempty"`
 	// WatchdogStaleThreshold is the staleness window for the watchdog target.
 	// Duration string (e.g., "10m"). Defers wake while the most-recent
-	// CreatedAt of an assignee=target bead is within this window. Should
-	// exceed the target's max patrol-cycle interval with margin. Empty
-	// or zero disables.
+	// actor=target event in .gc/events.jsonl is within this window.
+	// Should exceed the target's max idle-between-bead-touches interval
+	// with margin. Empty or zero disables.
 	WatchdogStaleThreshold string `toml:"watchdog_stale_threshold,omitempty"`
 	// SleepAfterIdle overrides idle sleep policy for this agent. Accepts a
 	// duration string (e.g., "30s") or "off".
