@@ -2,17 +2,11 @@ scope = "city"
 wake_mode = "fresh"
 work_dir = ".gc/agents/boot"
 max_active_sessions = 1
-# Watchdog gate: boot exists to verify gastown.deacon isn't stuck. Boot's
-# wake is deferred while the most-recent CreatedAt of an assignee=deacon
-# bead is within watchdog_stale_threshold. Deacon's patrol formula creates
-# a fresh wisp bead per cycle and assigns it to the deacon identity, so
-# this signal advances continuously while deacon is making progress and
-# goes stale promptly when deacon stops generating new wisps. The
-# watchdog fires only when deacon may be stuck.
-#
-# Threshold must exceed deacon's max exponential-backoff cap (~300s /
-# 5m) or boot will fire once per deacon backoff cycle in an idle city.
-# 10m clears that cap with margin and lets boot stay silent during
-# normal idle.
-watchdog_target_template = "gastown.deacon"
-watchdog_stale_threshold = "10m"
+# Temporary fallback to min_wake_interval. The watchdog gate uses
+# CreatedAt of assignee=deacon beads, which advances per new wisp but
+# not per patrol step within a wisp - so the gate still fires when
+# deacon is busy working a single long wisp. UpdatedAt would be the
+# right signal but is not exposed in the Go Bead struct. Pending an
+# events.jsonl-based signal (see open polecat task), reverting to the
+# 5m floor so the city doesn't burn while iterating.
+min_wake_interval = "5m"
