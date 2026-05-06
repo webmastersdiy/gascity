@@ -5,8 +5,13 @@ max_active_sessions = 1
 # Watchdog gate: boot exists to verify gastown.deacon isn't stuck. While
 # deacon has had a successful wake within watchdog_stale_threshold, boot
 # has nothing new to verify and the controller skips its wake. Boot
-# fires only when deacon's creation_complete_at is older than 5m,
-# meaning deacon may be stuck. Replaces a fixed-cadence floor with a
-# need-driven trigger.
+# fires only when deacon's creation_complete_at is older than this
+# threshold, meaning deacon may be stuck. Replaces a fixed-cadence
+# floor with a need-driven trigger.
+#
+# Threshold must exceed deacon's max exponential-backoff cap (~300s /
+# 5m) or boot will fire once per deacon backoff cycle in an idle city.
+# 10m clears that cap with margin and lets boot stay silent during
+# normal idle.
 watchdog_target_template = "gastown.deacon"
-watchdog_stale_threshold = "5m"
+watchdog_stale_threshold = "10m"
