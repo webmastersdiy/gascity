@@ -146,12 +146,15 @@ func minWakeIntervalDefersCandidate(candidate startCandidate, cfg *config.City, 
 
 // watchdogTargetActiveDefersCandidate reports whether the candidate's agent
 // is configured as a watchdog for another agent template, and that target
-// has had a successful wake recently enough that the watchdog has nothing
-// new to verify. Returns false (do not defer) when no watchdog is
-// configured, when the target session bead cannot be located, or when the
-// target's creation_complete_at is missing/unparseable. The watchdog wakes
-// only when the target may be stuck (creation_complete_at older than the
-// staleness threshold).
+// has been making progress recently enough that the watchdog has nothing
+// new to verify. Progress is measured by the most-recent CreatedAt across
+// beads where Assignee matches the target template name: each patrol cycle
+// of a long-running target creates a fresh wisp bead, so this signal
+// advances continuously while the target is alive and goes stale promptly
+// when the target stops generating new beads. Returns false (do not defer)
+// when no watchdog is configured, when no beads have ever been assigned to
+// the target, or when the most recent assignee=target bead's CreatedAt is
+// the zero time - those cases yield no signal, so the watchdog should fire.
 func watchdogTargetActiveDefersCandidate(candidate startCandidate, cfg *config.City, store beads.Store, clk clock.Clock) bool {
 	if candidate.session == nil {
 		return false
@@ -171,27 +174,20 @@ func watchdogTargetActiveDefersCandidate(candidate startCandidate, cfg *config.C
 	if store == nil {
 		return false
 	}
-	sessionBeads, err := store.ListByLabel("gc:session", 0)
+	assigned, err := store.List(beads.ListQuery{Assignee: target, IncludeClosed: true})
 	if err != nil {
 		return false
 	}
-	for _, b := range sessionBeads {
-		if strings.TrimSpace(b.Metadata["template"]) != target {
-			continue
+	var maxCreated time.Time
+	for _, b := range assigned {
+		if b.CreatedAt.After(maxCreated) {
+			maxCreated = b.CreatedAt
 		}
-		completedStr := strings.TrimSpace(b.Metadata["creation_complete_at"])
-		if completedStr == "" {
-			return false
-		}
-		completed, err := time.Parse(time.RFC3339, completedStr)
-		if err != nil {
-			return false
-		}
-		// Target had a successful wake within the threshold: target is
-		// alive, watchdog has nothing to verify.
-		return clk.Now().Sub(completed) < threshold
 	}
-	return false
+	if maxCreated.IsZero() {
+		return false
+	}
+	return clk.Now().Sub(maxCreated) < threshold
 }
 
 func asyncStartBatchNeedsFollowUp(candidates []startCandidate, cfg *config.City) bool {

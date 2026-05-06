@@ -2,18 +2,17 @@ scope = "city"
 wake_mode = "fresh"
 work_dir = ".gc/agents/boot"
 max_active_sessions = 1
-# Throttle re-spawn: with wake_mode = "fresh", the controller's
-# drain-followup poke would otherwise re-spawn boot within ~15s of
-# every drain, regardless of patrol_interval. min_wake_interval bounds
-# the wake cadence using boot's own creation_complete_at - simple but
-# fires regularly even when deacon is healthy.
+# Watchdog gate: boot exists to verify gastown.deacon isn't stuck. Boot's
+# wake is deferred while the most-recent CreatedAt of an assignee=deacon
+# bead is within watchdog_stale_threshold. Deacon's patrol formula creates
+# a fresh wisp bead per cycle and assigns it to the deacon identity, so
+# this signal advances continuously while deacon is making progress and
+# goes stale promptly when deacon stops generating new wisps. The
+# watchdog fires only when deacon may be stuck.
 #
-# (The watchdog_target_template gate was tested but uses
-# creation_complete_at on the TARGET, which only updates on the
-# target's session START - not on patrol cycles within a long-running
-# session. For boot+deacon that signal is wrong: deacon stays in one
-# session for hours so its creation_complete_at goes "stale" by the
-# threshold while deacon is actually patrolling fine. A working
-# watchdog signal needs to look at wisp/bead activity instead, which
-# requires more design work. Reverting to the floor for now.)
-min_wake_interval = "5m"
+# Threshold must exceed deacon's max exponential-backoff cap (~300s /
+# 5m) or boot will fire once per deacon backoff cycle in an idle city.
+# 10m clears that cap with margin and lets boot stay silent during
+# normal idle.
+watchdog_target_template = "gastown.deacon"
+watchdog_stale_threshold = "10m"

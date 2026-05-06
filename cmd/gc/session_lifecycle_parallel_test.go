@@ -4598,3 +4598,141 @@ func TestStopTargetThroughWorkerBoundary_CityStopLeavesSessionAsleep(t *testing.
 		t.Fatalf("suspended_at = %q, want empty", got.Metadata["suspended_at"])
 	}
 }
+
+func TestWatchdogTargetActiveDefersCandidate_DefersWhenTargetHasFreshAssignedBead(t *testing.T) {
+	now := time.Date(2026, 5, 5, 19, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:                   "boot",
+				WatchdogTargetTemplate: "deacon",
+				WatchdogStaleThreshold: "10m",
+			},
+		},
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "wisp-fresh", Status: "open", Type: "wisp", Assignee: "deacon", CreatedAt: now.Add(-30 * time.Second)},
+		{ID: "unrelated", Status: "open", Type: "task", Assignee: "someone-else", CreatedAt: now.Add(-1 * time.Second)},
+	}, nil)
+	candidate := startCandidate{
+		session: &beads.Bead{ID: "boot-session", Metadata: map[string]string{"template": "boot"}},
+		tp:      TemplateParams{TemplateName: "boot"},
+	}
+
+	if !watchdogTargetActiveDefersCandidate(candidate, cfg, store, clk) {
+		t.Fatal("expected defer (target made progress 30s ago, threshold 10m)")
+	}
+}
+
+func TestWatchdogTargetActiveDefersCandidate_FiresWhenTargetIsStale(t *testing.T) {
+	now := time.Date(2026, 5, 5, 19, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:                   "boot",
+				WatchdogTargetTemplate: "deacon",
+				WatchdogStaleThreshold: "10m",
+			},
+		},
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "wisp-stale", Status: "closed", Type: "wisp", Assignee: "deacon", CreatedAt: now.Add(-1 * time.Hour)},
+	}, nil)
+	candidate := startCandidate{
+		session: &beads.Bead{ID: "boot-session", Metadata: map[string]string{"template": "boot"}},
+		tp:      TemplateParams{TemplateName: "boot"},
+	}
+
+	if watchdogTargetActiveDefersCandidate(candidate, cfg, store, clk) {
+		t.Fatal("expected do-not-defer (target's last bead is 1h old, threshold 10m)")
+	}
+}
+
+func TestWatchdogTargetActiveDefersCandidate_FiresWhenTargetHasNoAssignedBeads(t *testing.T) {
+	now := time.Date(2026, 5, 5, 19, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:                   "boot",
+				WatchdogTargetTemplate: "deacon",
+				WatchdogStaleThreshold: "10m",
+			},
+		},
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "unrelated", Status: "open", Type: "task", Assignee: "someone-else", CreatedAt: now},
+	}, nil)
+	candidate := startCandidate{
+		session: &beads.Bead{ID: "boot-session", Metadata: map[string]string{"template": "boot"}},
+		tp:      TemplateParams{TemplateName: "boot"},
+	}
+
+	if watchdogTargetActiveDefersCandidate(candidate, cfg, store, clk) {
+		t.Fatal("expected do-not-defer when no signal (no assignee=target beads)")
+	}
+}
+
+func TestWatchdogTargetActiveDefersCandidate_NoWatchdogConfigured(t *testing.T) {
+	now := time.Date(2026, 5, 5, 19, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	cfg := &config.City{Agents: []config.Agent{{Name: "boot"}}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "wisp-fresh", Status: "open", Type: "wisp", Assignee: "deacon", CreatedAt: now},
+	}, nil)
+	candidate := startCandidate{
+		session: &beads.Bead{ID: "boot-session", Metadata: map[string]string{"template": "boot"}},
+		tp:      TemplateParams{TemplateName: "boot"},
+	}
+
+	if watchdogTargetActiveDefersCandidate(candidate, cfg, store, clk) {
+		t.Fatal("expected do-not-defer when no watchdog target is configured")
+	}
+}
+
+func TestWatchdogTargetActiveDefersCandidate_UsesNewestAcrossMultipleBeads(t *testing.T) {
+	now := time.Date(2026, 5, 5, 19, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:                   "boot",
+				WatchdogTargetTemplate: "deacon",
+				WatchdogStaleThreshold: "10m",
+			},
+		},
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "wisp-old1", Status: "closed", Type: "wisp", Assignee: "deacon", CreatedAt: now.Add(-2 * time.Hour)},
+		{ID: "wisp-newest", Status: "open", Type: "wisp", Assignee: "deacon", CreatedAt: now.Add(-1 * time.Minute)},
+		{ID: "wisp-old2", Status: "closed", Type: "wisp", Assignee: "deacon", CreatedAt: now.Add(-30 * time.Minute)},
+	}, nil)
+	candidate := startCandidate{
+		session: &beads.Bead{ID: "boot-session", Metadata: map[string]string{"template": "boot"}},
+		tp:      TemplateParams{TemplateName: "boot"},
+	}
+
+	if !watchdogTargetActiveDefersCandidate(candidate, cfg, store, clk) {
+		t.Fatal("expected defer based on newest bead (1m ago), not oldest")
+	}
+}
+
+func TestWatchdogTargetActiveDefersCandidate_NilSessionReturnsFalse(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{
+				Name:                   "boot",
+				WatchdogTargetTemplate: "deacon",
+				WatchdogStaleThreshold: "10m",
+			},
+		},
+	}
+	clk := &clock.Fake{Time: time.Date(2026, 5, 5, 19, 0, 0, 0, time.UTC)}
+	candidate := startCandidate{session: nil, tp: TemplateParams{TemplateName: "boot"}}
+
+	if watchdogTargetActiveDefersCandidate(candidate, cfg, beads.NewMemStore(), clk) {
+		t.Fatal("expected do-not-defer for nil session")
+	}
+}
